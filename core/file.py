@@ -22,43 +22,71 @@ from core.datatype import Movie
 logger = logging.getLogger(__name__)
 failed_items = []
 
+import os
+import re
+import json
+import itertools
+from typing import List
 
-def scan_movies(root: str, only_scan = False, data_cache_file = "") -> List[Movie]:
+
+def remove_unwanted_strings(filename, unwanted_strings):
+    """
+    移除文件名中的指定字符串
+    """
+    for unwanted in unwanted_strings:
+        filename = filename.replace(unwanted, '')
+    return filename
+
+
+def scan_movies(root: str, only_scan=False, data_cache_file="") -> List[Movie]:
     """获取文件夹内的所有影片的列表（自动探测同一文件夹内的分片）"""
-    # 由于实现的限制: 
+    # 由于实现的限制:
     # 1. 以数字编号最多支持10个分片，字母编号最多支持26个分片
     # 2. 允许分片间的编号有公共的前导符（如编号01, 02, 03），因为求prefix时前导符也会算进去
 
+    unwanted_strings = ['www.98T.la@']  # 需要移除的字符串列表
+
     # 扫描所有影片文件并获取它们的番号
-    dic = {}    # avid: [abspath1, abspath2...]
+    dic = {}  # avid: [abspath1, abspath2...]
     small_videos = {}
     for dirpath, dirnames, filenames in os.walk(root):
         for name in dirnames.copy():
             if name.startswith('.') or name in cfg.File.ignore_folder:
                 dirnames.remove(name)
         for file in filenames:
+            original_file = file  # 保存原始文件名
+            file = remove_unwanted_strings(file.replace(' ', ''), unwanted_strings)
+
+            # 获取新的文件路径
+            old_fullpath = os.path.join(dirpath, original_file)
+            new_fullpath = os.path.join(dirpath, file)
+
+            # 如果文件名被修改，则进行重命名操作
+            if old_fullpath != new_fullpath:
+                os.rename(old_fullpath, new_fullpath)
+                logger.info(f'文件重命名: {original_file} -> {file}')
+
             ext = os.path.splitext(file)[1].lower()
             if ext in cfg.File.media_ext:
-                fullpath = os.path.join(dirpath, file)
                 # 忽略小于指定大小的文件
-                filesize = os.path.getsize(fullpath)
+                filesize = os.path.getsize(new_fullpath)
                 if filesize < cfg.File.ignore_video_file_less_than:
-                    small_videos.setdefault(file, []).append(fullpath)
+                    small_videos.setdefault(file, []).append(new_fullpath)
                     continue
-                dvdid = get_id(fullpath)
-                cid = get_cid(fullpath)
+                dvdid = get_id(new_fullpath)
+                cid = get_cid(new_fullpath)
                 # 如果文件名能匹配到cid，那么将cid视为有效id，因为此时dvdid多半是错的
                 avid = cid if cid else dvdid
                 if avid:
                     if avid in dic:
-                        dic[avid].append(fullpath)
+                        dic[avid].append(new_fullpath)
                     else:
-                        dic[avid] = [fullpath]
+                        dic[avid] = [new_fullpath]
                 else:
                     fail = Movie('无法识别番号')
-                    fail.files = [fullpath]
+                    fail.files = [new_fullpath]
                     failed_items.append(fail)
-                    logger.error(f"无法提取影片番号: '{fullpath}'")
+                    logger.error(f"无法提取影片番号: '{new_fullpath}'")
     # 多分片影片容易有文件大小低于阈值的子片，进行特殊处理
     has_avid = {}
     for name in list(small_videos.keys()):
@@ -70,7 +98,7 @@ def scan_movies(root: str, only_scan = False, data_cache_file = "") -> List[Movi
         elif avid:
             has_avid[name] = avid
     # 对于前面忽略的视频生成一个简单的提示
-    small_videos = {k:sorted(v) for k,v in sorted(small_videos.items())}
+    small_videos = {k: sorted(v) for k, v in sorted(small_videos.items())}
     skipped_files = list(itertools.chain(*small_videos.values()))
     skipped_cnt = len(skipped_files)
     if skipped_cnt > 0:
@@ -106,8 +134,8 @@ def scan_movies(root: str, only_scan = False, data_cache_file = "") -> List[Movi
         slices = [i[0] for i in remaining]
         # 如果有不同的后缀，说明有文件名不符合正则表达式条件（没有发生替换或不带分片信息）
         if (len(set(postfixes)) != 1
-            # remaining为初步提取的分片信息，不允许有重复值
-            or len(slices) != len(set(slices))):
+                # remaining为初步提取的分片信息，不允许有重复值
+                or len(slices) != len(set(slices))):
             logger.debug(f"无法识别分片信息: {prefix=}, {remaining=}")
             non_slice_dup[avid] = files
             del dic[avid]
@@ -115,7 +143,7 @@ def scan_movies(root: str, only_scan = False, data_cache_file = "") -> List[Movi
         # 影片编号必须从 0/1/a 开始且编号连续
         sorted_slices = sorted(slices)
         first, last = sorted_slices[0], sorted_slices[-1]
-        if (first not in ('0', '1', 'a')) or (ord(last) != (ord(first)+len(sorted_slices)-1)):
+        if (first not in ('0', '1', 'a')) or (ord(last) != (ord(first) + len(sorted_slices) - 1)):
             logger.debug(f"无效的分片起始编号或分片编号不连续: {sorted_slices=}")
             non_slice_dup[avid] = files
             del dic[avid]
@@ -158,7 +186,6 @@ def scan_movies(root: str, only_scan = False, data_cache_file = "") -> List[Movi
         with open(data_cache_file, 'w', encoding='utf-8') as file:
             file.write(json_str)  # 将数据写入文件
     return movies
-
 
 def get_failed_when_scan():
     """获取扫描影片过程中无法自动识别番号的条目"""
